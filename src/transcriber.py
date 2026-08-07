@@ -6,8 +6,10 @@ from datetime import datetime
 from pathlib import Path
 
 import httpx
+import soundfile as sf
 
 from . import config
+from .echo_cancel import apply_echo_cancellation
 from .merger import Segment, render_markdown
 
 logger = logging.getLogger(__name__)
@@ -86,6 +88,23 @@ async def transcribe_meeting(wav: Path, language: str | None = None) -> Path:
     with tempfile.TemporaryDirectory() as tmp:
         left = extract_channel(wav, 0, Path(tmp) / "left.wav")
         right = extract_channel(wav, 1, Path(tmp) / "right.wav")
+
+        if config.ECHO_CANCEL_ENABLED:
+            mic_data, sr = await asyncio.to_thread(sf.read, left)
+            ref_data, _ = await asyncio.to_thread(sf.read, right)
+            cleaned = await asyncio.to_thread(
+                apply_echo_cancellation,
+                mic_data,
+                ref_data,
+                config.ECHO_CANCEL_FILTER_LENGTH,
+                config.ECHO_CANCEL_MU,
+            )
+            await asyncio.to_thread(sf.write, left, cleaned, sr)
+            logger.info(
+                "Echo cancellation applied: filter_length=%d, mu=%.3f",
+                config.ECHO_CANCEL_FILTER_LENGTH,
+                config.ECHO_CANCEL_MU,
+            )
 
         timeout = httpx.Timeout(None, connect=10.0)
         async with httpx.AsyncClient(timeout=timeout) as client:

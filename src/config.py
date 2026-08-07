@@ -18,6 +18,14 @@ SYSTEM_CHANNELS: tuple[int, ...] = tuple(
     int(c) for c in os.getenv("SYSTEM_CHANNELS", "1,2").split(",")
 )
 
+# Echo cancellation: subtracts speaker output captured by the microphone
+# using the system audio channel as reference (NLMS adaptive filter).
+ECHO_CANCEL_ENABLED: bool = os.getenv("ECHO_CANCEL_ENABLED", "").lower() in (
+    "1", "true", "yes",
+)
+ECHO_CANCEL_FILTER_LENGTH: int = int(os.getenv("ECHO_CANCEL_FILTER_LENGTH", "128"))
+ECHO_CANCEL_MU: float = float(os.getenv("ECHO_CANCEL_MU", "0.1"))
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 RAW_DIR = BASE_DIR / "data" / "raw"
 TRANSCRIPT_DIR = BASE_DIR / "data" / "transcripts"
