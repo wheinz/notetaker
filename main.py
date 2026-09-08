@@ -15,6 +15,7 @@ from src.recorder import (
     record,
 )
 from src.transcriber import transcribe_meeting
+from src.whisper_server import WhisperServerError, temporary_model
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -76,9 +77,14 @@ def _transcribe_command(args: argparse.Namespace) -> int:
     if not wav.is_file():
         print(f"No such file: {wav}")
         return 1
-    output = asyncio.run(transcribe_meeting(wav, language=args.language))
-    print(f"Transcript saved to {output}")
-    return 0
+    try:
+        with temporary_model(args.model or "turbo"):
+            output = asyncio.run(transcribe_meeting(wav, language=args.language))
+        print(f"Transcript saved to {output}")
+        return 0
+    except WhisperServerError as exc:
+        print(f"Whisper server error: {exc}", file=sys.stderr)
+        return 1
 
 
 def main() -> None:
@@ -109,6 +115,11 @@ def main() -> None:
     transcribe_parser.add_argument("audio", help="Path to the stereo WAV file")
     transcribe_parser.add_argument(
         "--language", help="Whisper language code (default: auto-detect)"
+    )
+    transcribe_parser.add_argument(
+        "--model",
+        choices=("small", "medium", "turbo"),
+        help="Whisper model for this run (default: turbo)",
     )
 
     args = parser.parse_args()

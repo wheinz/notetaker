@@ -10,7 +10,7 @@ import soundfile as sf
 
 from . import config
 from .echo_cancel import apply_echo_cancellation
-from .merger import Segment, render_markdown
+from .merger import Segment, remove_echo_duplicates, remove_repetitions, render_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +48,20 @@ def parse_segments(payload: dict) -> list[Segment]:
         if not text:
             continue
         segments.append(
-            Segment(start=float(raw["start"]), end=float(raw["end"]), text=text)
+            Segment(
+                start=float(raw["start"]),
+                end=float(raw["end"]),
+                text=text,
+                no_speech_prob=float(raw.get("no_speech_prob", 0.0)),
+            )
         )
     return segments
+
+
+def filter_non_speech(
+    segments: list[Segment], threshold: float = config.NO_SPEECH_THRESHOLD
+) -> list[Segment]:
+    return [seg for seg in segments if seg.no_speech_prob < threshold]
 
 
 async def transcribe_file(
@@ -62,6 +73,8 @@ async def transcribe_file(
     data = {"response_format": "verbose_json", "temperature": "0.0"}
     if language:
         data["language"] = language
+    if config.VAD_ENABLED:
+        data["vad"] = "true"
     content = await asyncio.to_thread(wav.read_bytes)
     response = await client.post(
         f"{base_url}/inference",
@@ -112,6 +125,35 @@ async def transcribe_meeting(wav: Path, language: str | None = None) -> Path:
                 transcribe_file(client, left, language),
                 transcribe_file(client, right, language),
             )
+
+    if config.NO_SPEECH_FILTER_ENABLED:
+        me = filter_non_speech(me)
+        others = filter_non_speech(others)
+
+    if config.REPETITION_DEDUP_ENABLED:
+        before = len(me) + len(others)
+        me = remove_repetitions(
+            me, similarity_threshold=config.REPETITION_DEDUP_SIMILARITY
+        )
+        others = remove_repetitions(
+            others, similarity_threshold=config.REPETITION_DEDUP_SIMILARITY
+        )
+        removed = before - (len(me) + len(others))
+        if removed:
+            logger.info("Removed %d repeated hallucination segments", removed)
+
+    if config.ECHO_DEDUP_ENABLED:
+        before = len(me)
+        me = remove_echo_duplicates(
+            me,
+            others,
+            similarity_threshold=config.ECHO_DEDUP_SIMILARITY,
+            overlap_padding=config.ECHO_DEDUP_OVERLAP_PADDING,
+            min_words=config.ECHO_DEDUP_MIN_WORDS,
+        )
+        removed = before - len(me)
+        if removed:
+            logger.info("Removed %d likely mic echo duplicate segments", removed)
 
     markdown = render_markdown(me, others, title=title_from_stem(wav.stem))
     output = config.TRANSCRIPT_DIR / f"{wav.stem}.md"

@@ -6,6 +6,7 @@ import pytest
 from src import config, transcriber
 from src.merger import Segment
 from src.transcriber import (
+    filter_non_speech,
     parse_segments,
     title_from_stem,
     transcribe_file,
@@ -35,6 +36,29 @@ def test_parse_segments_strips_and_skips_empty():
 
 def test_parse_segments_handles_missing_key():
     assert parse_segments({"text": "no segments"}) == []
+
+
+def test_parse_segments_reads_no_speech_prob():
+    payload = {
+        "segments": [
+            {"text": "hello", "start": 0.0, "end": 1.0, "no_speech_prob": 0.8}
+        ]
+    }
+    segments = parse_segments(payload)
+    assert segments[0].no_speech_prob == 0.8
+
+
+def test_parse_segments_defaults_no_speech_prob_to_zero():
+    payload = {"segments": [{"text": "hello", "start": 0.0, "end": 1.0}]}
+    assert parse_segments(payload)[0].no_speech_prob == 0.0
+
+
+def test_filter_non_speech_removes_high_probability():
+    segments = [
+        Segment(0.0, 1.0, "real speech", no_speech_prob=0.1),
+        Segment(1.0, 2.0, "hallucination", no_speech_prob=0.9),
+    ]
+    assert filter_non_speech(segments, threshold=0.6) == [segments[0]]
 
 
 def test_title_from_stem_parses_default_pattern():
@@ -95,6 +119,8 @@ def test_transcribe_meeting_merges_channels(tmp_path, monkeypatch):
 
     monkeypatch.setattr(transcriber, "extract_channel", fake_extract)
     monkeypatch.setattr(transcriber, "transcribe_file", fake_transcribe)
+    monkeypatch.setattr(config, "ECHO_CANCEL_ENABLED", False)
+    monkeypatch.setattr(config, "ECHO_DEDUP_ENABLED", False)
     monkeypatch.setattr(config, "TRANSCRIPT_DIR", tmp_path / "transcripts")
 
     output = asyncio.run(transcribe_meeting(stereo))

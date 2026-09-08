@@ -69,6 +69,18 @@ For parallel transcription of both audio channels, start the server with:
 ./whisper-server -m models/ggml-base.en.bin -np 2
 ```
 
+To suppress hallucinated segments on silence, enable voice activity detection by
+downloading the Silero VAD model and passing it to the server:
+
+```bash
+bash ./models/download-vad-model.sh silero-v6.2.0
+./whisper-server -m models/ggml-base.en.bin -vm models/ggml-silero-v6.2.0.bin
+```
+
+The notetaker requests VAD per transcription when `VAD_ENABLED=true` (default).
+If you run the server via launchd, add `-vm /path/to/ggml-silero-v6.2.0.bin` to
+its `ProgramArguments` and `launchctl kickstart -k gui/$(id -u)/<label>`.
+
 ## Usage
 
 ### Verify your setup
@@ -105,7 +117,30 @@ Optionally specify a language:
 uv run main.py transcribe data/raw/meeting_20260730_135948.wav --language en
 ```
 
+For higher-quality meeting transcription, temporarily switch the launchd-managed
+`whisper-server` to a larger local model for just this run:
+
+```bash
+uv run main.py transcribe data/raw/meeting_20260730_135948.wav --model medium
+```
+
+After the transcript is written, the CLI restores the model that was active
+before the command started. This expects `ggml-medium.bin` to exist in
+`~/Documents/Github/whisper.cpp/models/`, unless `WHISPER_MODELS_DIR` points
+somewhere else. The LaunchAgent path can be overridden with
+`WHISPER_LAUNCH_AGENT`.
+
 Transcripts are written to `data/transcripts/`.
+
+By default, transcription removes likely speaker echo duplicates from the
+microphone channel only when a mic segment overlaps system audio and the text is
+very similar. Tune or disable this with `ECHO_DEDUP_*` settings in `.env`.
+
+Whisper occasionally hallucinates the same phrase repeatedly on silence (a
+"looping" failure). Two safeguards are on by default: segments with a high
+`no_speech_prob` are dropped, and consecutive near-identical segments within a
+channel are collapsed to a single occurrence. Tune these with the
+`NO_SPEECH_FILTER_*` and `REPETITION_DEDUP_*` settings.
 
 ### Run tests
 
@@ -134,9 +169,16 @@ Transcripts are Markdown files with interleaved, timestamped segments from both 
 | `BLACKHOLE_DEVICE_MATCH` | `blackhole` | Substring to find BlackHole |
 | `MIC_CHANNEL` | `0` | Channel index for microphone |
 | `SYSTEM_CHANNELS` | `1,2` | Channel indices for system audio |
+| `ECHO_DEDUP_ENABLED` | `true` | Remove likely speaker echo duplicates from mic transcript segments |
+| `ECHO_DEDUP_SIMILARITY` | `0.72` | Minimum text similarity for echo deduplication |
+| `REPETITION_DEDUP_ENABLED` | `true` | Collapse consecutive near-identical hallucinated segments per channel |
+| `REPETITION_DEDUP_SIMILARITY` | `0.85` | Minimum text similarity for repetition deduplication |
+| `NO_SPEECH_FILTER_ENABLED` | `true` | Drop segments with high `no_speech_prob` |
+| `NO_SPEECH_THRESHOLD` | `0.6` | `no_speech_prob` cutoff for the silence filter |
+| `VAD_ENABLED` | `true` | Request voice activity detection from the whisper.cpp server |
 
 ## How it works
 
 1. **Recording**: `sounddevice` captures from the aggregate device — mic on channel 0, system audio on channels 1–2. Averages the system channels and writes a stereo WAV (left = mic, right = system).
 2. **Transcription**: `ffmpeg` splits the stereo WAV into two 16 kHz mono files, then both are sent to the whisper.cpp `/inference` endpoint in parallel.
-3. **Merging**: Timestamped segments from both channels are interleaved by start time and rendered as Markdown.
+3. **Merging**: Timestamped segments from both channels are interleaved by start time and rendered as Markdown, after filtering silence, collapsing hallucinated repetitions, and removing echo duplicates.
