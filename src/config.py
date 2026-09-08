@@ -4,16 +4,28 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent.parent
 
-WHISPER_SERVER_URL: str = os.getenv("WHISPER_SERVER_URL", "http://127.0.0.1:8080")
-WHISPER_LAUNCH_AGENT: Path = Path(
+WHISPER_SERVER_HOST: str = os.getenv("WHISPER_SERVER_HOST", "127.0.0.1")
+WHISPER_SERVER_PORT: int = int(os.getenv("WHISPER_SERVER_PORT", "8082"))
+WHISPER_SERVER_URL = f"http://{WHISPER_SERVER_HOST}:{WHISPER_SERVER_PORT}"
+WHISPER_SERVER_BIN: Path = Path(
     os.getenv(
-        "WHISPER_LAUNCH_AGENT",
-        Path.home() / "Library/LaunchAgents/com.whisper.cpp.server.plist",
+        "WHISPER_SERVER_BIN",
+        Path.home() / "Documents/Github/whisper.cpp/build/bin/whisper-server",
     )
 ).expanduser()
 WHISPER_MODELS_DIR: Path = Path(
     os.getenv("WHISPER_MODELS_DIR", Path.home() / "Documents/Github/whisper.cpp/models")
+).expanduser()
+WHISPER_VAD_MODEL: Path = Path(
+    os.getenv(
+        "WHISPER_VAD_MODEL",
+        WHISPER_MODELS_DIR / "ggml-silero-v6.2.0.bin",
+    )
+).expanduser()
+WHISPER_SERVER_LOG: Path = Path(
+    os.getenv("WHISPER_SERVER_LOG", BASE_DIR / "data/whisper-server.log")
 ).expanduser()
 
 # Audio device identification (case-insensitive substring match)
@@ -67,6 +79,5 @@ VAD_ENABLED: bool = os.getenv("VAD_ENABLED", "true").lower() in (
     "1", "true", "yes",
 )
 
-BASE_DIR = Path(__file__).resolve().parent.parent
 RAW_DIR = BASE_DIR / "data" / "raw"
 TRANSCRIPT_DIR = BASE_DIR / "data" / "transcripts"

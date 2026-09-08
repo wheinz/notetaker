@@ -1,5 +1,3 @@
-import os
-import plistlib
 import subprocess
 import time
 from collections.abc import Iterator
@@ -21,133 +19,106 @@ class WhisperServerError(RuntimeError):
     pass
 
 
-def default_launch_agent() -> Path:
-    return config.WHISPER_LAUNCH_AGENT
-
-
-def default_models_dir() -> Path:
-    return config.WHISPER_MODELS_DIR
-
-
 def model_path(model: str, models_dir: Path | None = None) -> Path:
     if model not in MODEL_FILES:
         choices = ", ".join(sorted(MODEL_FILES))
         raise WhisperServerError(f"Unknown Whisper model '{model}' (choose: {choices})")
-    path = (models_dir or default_models_dir()) / MODEL_FILES[model]
+    path = (models_dir or config.WHISPER_MODELS_DIR) / MODEL_FILES[model]
     if not path.is_file():
         raise WhisperServerError(f"Whisper model not found: {path}")
     return path
 
 
-def _read_plist(path: Path) -> dict:
+def server_command(
+    model: str,
+    server_bin: Path | None = None,
+    models_dir: Path | None = None,
+    vad_model: Path | None = None,
+    host: str = config.WHISPER_SERVER_HOST,
+    port: int = config.WHISPER_SERVER_PORT,
+) -> list[str]:
+    binary = server_bin or config.WHISPER_SERVER_BIN
+    vad = vad_model or config.WHISPER_VAD_MODEL
+    if not binary.is_file():
+        raise WhisperServerError(f"whisper-server not found: {binary}")
+    if not vad.is_file():
+        raise WhisperServerError(f"Whisper VAD model not found: {vad}")
+    return [
+        str(binary),
+        "-m",
+        str(model_path(model, models_dir=models_dir)),
+        "-vm",
+        str(vad),
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "-l",
+        "auto",
+    ]
+
+
+def server_is_ready(url: str = config.WHISPER_SERVER_URL) -> bool:
     try:
-        with path.open("rb") as f:
-            return plistlib.load(f)
-    except FileNotFoundError as exc:
-        raise WhisperServerError(f"Whisper LaunchAgent not found: {path}") from exc
-
-
-def _write_plist(path: Path, data: dict) -> None:
-    with path.open("wb") as f:
-        plistlib.dump(data, f, sort_keys=False)
-
-
-def current_model_path(launch_agent: Path | None = None) -> Path:
-    plist = _read_plist(launch_agent or default_launch_agent())
-    args = plist.get("ProgramArguments", [])
-    try:
-        return Path(args[args.index("-m") + 1])
-    except (ValueError, IndexError) as exc:
-        raise WhisperServerError("Whisper LaunchAgent has no '-m <model>' argument") from exc
-
-
-def set_model_path(model: Path, launch_agent: Path | None = None) -> Path:
-    path = launch_agent or default_launch_agent()
-    plist = _read_plist(path)
-    args = list(plist.get("ProgramArguments", []))
-    try:
-        model_index = args.index("-m") + 1
-    except ValueError as exc:
-        raise WhisperServerError("Whisper LaunchAgent has no '-m <model>' argument") from exc
-
-    previous = Path(args[model_index])
-    args[model_index] = str(model)
-    plist["ProgramArguments"] = args
-    _write_plist(path, plist)
-    return previous
-
-
-def restart_launch_agent(launch_agent: Path | None = None) -> None:
-    path = launch_agent or default_launch_agent()
-    domain = f"gui/{os.getuid()}"
-    bootout = subprocess.run(
-        ["launchctl", "bootout", domain, str(path)],
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    if bootout.returncode not in (0, 36):
-        raise WhisperServerError(f"launchctl bootout failed: {bootout.stderr.strip()}")
-
-    bootstrap = subprocess.run(
-        ["launchctl", "bootstrap", domain, str(path)],
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    if bootstrap.returncode != 0:
-        raise WhisperServerError(
-            f"launchctl bootstrap failed: {bootstrap.stderr.strip()}"
-        )
+        return httpx.get(f"{url}/health", timeout=2).status_code == 200
+    except httpx.HTTPError:
+        return False
 
 
 def wait_until_ready(
+    process: subprocess.Popen,
     url: str = config.WHISPER_SERVER_URL,
     timeout_seconds: float = 300.0,
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
-    last_error = ""
     while time.monotonic() < deadline:
-        try:
-            response = httpx.get(f"{url}/health", timeout=3)
-            if response.status_code == 200:
-                return
-            last_error = f"HTTP {response.status_code}"
-        except httpx.HTTPError as exc:
-            last_error = str(exc)
-        time.sleep(1)
-    raise WhisperServerError(f"Whisper server did not become ready: {last_error}")
-
-
-def switch_model(
-    model: str,
-    launch_agent: Path | None = None,
-    models_dir: Path | None = None,
-) -> Path:
-    target = model_path(model, models_dir=models_dir)
-    previous = set_model_path(target, launch_agent=launch_agent)
-    if previous != target:
-        restart_launch_agent(launch_agent=launch_agent)
-        wait_until_ready()
-    return previous
+        if process.poll() is not None:
+            raise WhisperServerError(
+                f"whisper-server exited during startup with code {process.returncode}"
+            )
+        if server_is_ready(url):
+            return
+        time.sleep(0.5)
+    raise WhisperServerError("whisper-server did not become ready in time")
 
 
 @contextmanager
-def temporary_model(
-    model: str,
-    launch_agent: Path | None = None,
+def temporary_server(
+    model: str = "turbo",
+    *,
+    server_bin: Path | None = None,
     models_dir: Path | None = None,
+    vad_model: Path | None = None,
+    log_path: Path | None = None,
 ) -> Iterator[None]:
-    target = model_path(model, models_dir=models_dir)
-    previous = set_model_path(target, launch_agent=launch_agent)
-    changed = previous != target
-    try:
-        if changed:
-            restart_launch_agent(launch_agent=launch_agent)
-            wait_until_ready()
-        yield
-    finally:
-        if changed:
-            set_model_path(previous, launch_agent=launch_agent)
-            restart_launch_agent(launch_agent=launch_agent)
-            wait_until_ready()
+    if server_is_ready():
+        raise WhisperServerError(
+            f"Port {config.WHISPER_SERVER_PORT} is already serving another Whisper process"
+        )
+
+    command = server_command(
+        model,
+        server_bin=server_bin,
+        models_dir=models_dir,
+        vad_model=vad_model,
+    )
+    output = log_path or config.WHISPER_SERVER_LOG
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    with output.open("a", encoding="utf-8") as log:
+        try:
+            process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
+        except OSError as exc:
+            raise WhisperServerError(f"Could not start whisper-server: {exc}") from exc
+
+        try:
+            wait_until_ready(process)
+            yield
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)

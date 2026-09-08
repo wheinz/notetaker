@@ -4,7 +4,6 @@ import logging
 import sys
 from pathlib import Path
 
-import httpx
 import sounddevice as sd
 
 from src import config
@@ -15,7 +14,7 @@ from src.recorder import (
     record,
 )
 from src.transcriber import transcribe_meeting
-from src.whisper_server import WhisperServerError, temporary_model
+from src.whisper_server import WhisperServerError, server_command, temporary_server
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -52,12 +51,13 @@ def _devices_command(args: argparse.Namespace) -> int:
 
     server_ok = False
     try:
-        response = httpx.get(f"{config.WHISPER_SERVER_URL}/health", timeout=3)
-        server_ok = response.status_code == 200
-    except httpx.HTTPError:
+        server_command("turbo")
+        server_ok = True
+    except WhisperServerError:
         pass
     print(
-        f"[{_check_mark(server_ok)}] whisper.cpp server ({config.WHISPER_SERVER_URL})"
+        f"[{_check_mark(server_ok)}] on-demand whisper.cpp server "
+        f"({config.WHISPER_SERVER_URL})"
     )
 
     if not (blackhole_ok and aggregate and server_ok):
@@ -78,7 +78,7 @@ def _transcribe_command(args: argparse.Namespace) -> int:
         print(f"No such file: {wav}")
         return 1
     try:
-        with temporary_model(args.model or "turbo"):
+        with temporary_server(args.model or "turbo"):
             output = asyncio.run(transcribe_meeting(wav, language=args.language))
         print(f"Transcript saved to {output}")
         return 0

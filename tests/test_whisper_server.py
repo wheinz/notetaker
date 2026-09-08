@@ -1,102 +1,89 @@
-import plistlib
+from pathlib import Path
 
 import pytest
 
 from src import whisper_server
 
 
-def _write_agent(path, model):
-    data = {
-        "Label": "com.whisper.cpp.server",
-        "ProgramArguments": [
-            "/tmp/whisper-server",
-            "-m",
-            str(model),
-            "-cm",
-            "/tmp/correction.gguf",
-        ],
-    }
-    with path.open("wb") as f:
-        plistlib.dump(data, f)
+def _runtime_files(tmp_path: Path) -> tuple[Path, Path, Path]:
+    binary = tmp_path / "whisper-server"
+    model = tmp_path / "ggml-large-v3-turbo.bin"
+    vad = tmp_path / "ggml-silero-v6.2.0.bin"
+    binary.touch()
+    model.touch()
+    vad.touch()
+    return binary, model, vad
 
 
-def test_current_model_path_reads_launch_agent(tmp_path):
-    small = tmp_path / "ggml-small.bin"
-    small.touch()
-    agent = tmp_path / "agent.plist"
-    _write_agent(agent, small)
+def test_server_command_uses_isolated_port_and_vad(tmp_path):
+    binary, model, vad = _runtime_files(tmp_path)
 
-    assert whisper_server.current_model_path(agent) == small
-
-
-def test_temporary_model_switches_and_restores(tmp_path, monkeypatch):
-    small = tmp_path / "ggml-small.bin"
-    medium = tmp_path / "ggml-medium.bin"
-    small.touch()
-    medium.touch()
-    agent = tmp_path / "agent.plist"
-    _write_agent(agent, small)
-    restarts = []
-
-    monkeypatch.setattr(
-        whisper_server, "restart_launch_agent", lambda launch_agent=None: restarts.append(launch_agent)
+    command = whisper_server.server_command(
+        "turbo",
+        server_bin=binary,
+        models_dir=tmp_path,
+        vad_model=vad,
+        host="127.0.0.1",
+        port=9090,
     )
-    monkeypatch.setattr(whisper_server, "wait_until_ready", lambda: None)
 
-    with whisper_server.temporary_model(
-        "medium",
-        launch_agent=agent,
-        models_dir=tmp_path,
-    ):
-        assert whisper_server.current_model_path(agent) == medium
-
-    assert whisper_server.current_model_path(agent) == small
-    assert restarts == [agent, agent]
-
-
-def test_temporary_model_restores_after_error(tmp_path, monkeypatch):
-    small = tmp_path / "ggml-small.bin"
-    medium = tmp_path / "ggml-medium.bin"
-    small.touch()
-    medium.touch()
-    agent = tmp_path / "agent.plist"
-    _write_agent(agent, small)
-
-    monkeypatch.setattr(whisper_server, "restart_launch_agent", lambda launch_agent=None: None)
-    monkeypatch.setattr(whisper_server, "wait_until_ready", lambda: None)
-
-    with pytest.raises(ValueError, match="boom"), whisper_server.temporary_model(
-        "medium",
-        launch_agent=agent,
-        models_dir=tmp_path,
-    ):
-        raise ValueError("boom")
-
-    assert whisper_server.current_model_path(agent) == small
-
-
-def test_temporary_model_does_not_restart_when_already_target(tmp_path, monkeypatch):
-    medium = tmp_path / "ggml-medium.bin"
-    medium.touch()
-    agent = tmp_path / "agent.plist"
-    _write_agent(agent, medium)
-    restarts = []
-
-    monkeypatch.setattr(
-        whisper_server, "restart_launch_agent", lambda launch_agent=None: restarts.append(launch_agent)
-    )
-    monkeypatch.setattr(whisper_server, "wait_until_ready", lambda: None)
-
-    with whisper_server.temporary_model(
-        "medium",
-        launch_agent=agent,
-        models_dir=tmp_path,
-    ):
-        assert whisper_server.current_model_path(agent) == medium
-
-    assert restarts == []
+    assert command[0] == str(binary)
+    assert command[command.index("-m") + 1] == str(model)
+    assert command[command.index("-vm") + 1] == str(vad)
+    assert command[command.index("--port") + 1] == "9090"
+    assert command[command.index("-l") + 1] == "auto"
 
 
 def test_missing_model_raises(tmp_path):
     with pytest.raises(whisper_server.WhisperServerError, match="not found"):
-        whisper_server.model_path("medium", models_dir=tmp_path)
+        whisper_server.model_path("turbo", models_dir=tmp_path)
+
+
+def test_temporary_server_stops_process(tmp_path, monkeypatch):
+    binary, _, vad = _runtime_files(tmp_path)
+
+    class FakeProcess:
+        returncode = None
+
+        def __init__(self, *args, **kwargs):
+            self.terminated = False
+
+        def poll(self):
+            return 0 if self.terminated else None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            return 0
+
+    processes = []
+
+    def fake_popen(*args, **kwargs):
+        process = FakeProcess()
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(whisper_server, "server_is_ready", lambda: False)
+    monkeypatch.setattr(whisper_server.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(whisper_server, "wait_until_ready", lambda process: None)
+
+    with whisper_server.temporary_server(
+        "turbo",
+        server_bin=binary,
+        models_dir=tmp_path,
+        vad_model=vad,
+        log_path=tmp_path / "server.log",
+    ):
+        assert not processes[0].terminated
+
+    assert processes[0].terminated
+
+
+def test_temporary_server_rejects_occupied_port(monkeypatch):
+    monkeypatch.setattr(whisper_server, "server_is_ready", lambda: True)
+    with (
+        pytest.raises(whisper_server.WhisperServerError, match="already serving"),
+        whisper_server.temporary_server(),
+    ):
+        pass

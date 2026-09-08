@@ -7,7 +7,7 @@ Dual-channel meeting note taker: records your microphone (left channel) and syst
 - **Python 3.13+** (managed via [uv](https://docs.astral.sh/uv/))
 - **ffmpeg** — available on PATH
 - **BlackHole** (macOS only) — virtual audio driver for capturing system audio
-- **whisper.cpp server** — running locally with a model loaded
+- A locally built **whisper.cpp** checkout with the turbo and VAD models
 
 ## Installation
 
@@ -30,10 +30,12 @@ uv sync
 cp .env.example .env
 ```
 
-Edit `.env` if your whisper.cpp server is running on a different host or port:
+The notetaker starts a temporary server on port 8082. Override paths or the
+port in `.env` only if your checkout differs from the defaults:
 
 ```
-WHISPER_SERVER_URL=http://127.0.0.1:8080
+WHISPER_SERVER_BIN=~/Documents/Github/whisper.cpp/build/bin/whisper-server
+WHISPER_MODELS_DIR=~/Documents/Github/whisper.cpp/models
 ```
 
 ### 4. Install BlackHole
@@ -53,33 +55,20 @@ brew install blackhole-2ch
    - Enable **Drift Correction** for BlackHole.
 4. Go to **System Settings > Sound > Output** and select the Multi-Output Device.
 
-### 6. Build and run whisper.cpp server
+### 6. Build stock whisper.cpp and download models
 
 ```bash
 git clone https://github.com/ggerganov/whisper.cpp.git
 cd whisper.cpp
-make whisper-server
-bash ./models/download-ggml-model.sh base.en
-./whisper-server -m models/ggml-base.en.bin
-```
-
-For parallel transcription of both audio channels, start the server with:
-
-```bash
-./whisper-server -m models/ggml-base.en.bin -np 2
-```
-
-To suppress hallucinated segments on silence, enable voice activity detection by
-downloading the Silero VAD model and passing it to the server:
-
-```bash
+cmake -B build
+cmake --build build --config Release -j --target whisper-server
+bash ./models/download-ggml-model.sh large-v3-turbo
 bash ./models/download-vad-model.sh silero-v6.2.0
-./whisper-server -m models/ggml-base.en.bin -vm models/ggml-silero-v6.2.0.bin
 ```
 
-The notetaker requests VAD per transcription when `VAD_ENABLED=true` (default).
-If you run the server via launchd, add `-vm /path/to/ggml-silero-v6.2.0.bin` to
-its `ProgramArguments` and `launchctl kickstart -k gui/$(id -u)/<label>`.
+The CLI starts this server only while transcribing, using the turbo model and
+VAD. It runs on port 8082 so it does not interfere with
+the persistent small-model server used by the separate dictation project.
 
 ## Usage
 
@@ -89,7 +78,8 @@ its `ProgramArguments` and `launchctl kickstart -k gui/$(id -u)/<label>`.
 uv run main.py devices
 ```
 
-This lists available audio devices, checks for BlackHole, and tests the whisper.cpp server connection.
+This lists available audio devices, checks for BlackHole, and verifies the
+on-demand Whisper binary and models.
 
 ### Record a meeting
 
@@ -117,18 +107,15 @@ Optionally specify a language:
 uv run main.py transcribe data/raw/meeting_20260730_135948.wav --language en
 ```
 
-For higher-quality meeting transcription, temporarily switch the launchd-managed
-`whisper-server` to a larger local model for just this run:
+Meeting transcription uses `large-v3-turbo` by default. A different installed
+model can be selected explicitly:
 
 ```bash
 uv run main.py transcribe data/raw/meeting_20260730_135948.wav --model medium
 ```
 
-After the transcript is written, the CLI restores the model that was active
-before the command started. This expects `ggml-medium.bin` to exist in
-`~/Documents/Github/whisper.cpp/models/`, unless `WHISPER_MODELS_DIR` points
-somewhere else. The LaunchAgent path can be overridden with
-`WHISPER_LAUNCH_AGENT`.
+The temporary server is stopped after the transcript is written, including when
+transcription fails.
 
 Transcripts are written to `data/transcripts/`.
 
@@ -164,7 +151,9 @@ Transcripts are Markdown files with interleaved, timestamped segments from both 
 
 | Variable | Default | Description |
 |---|---|---|
-| `WHISPER_SERVER_URL` | `http://127.0.0.1:8080` | URL of the whisper.cpp server |
+| `WHISPER_SERVER_PORT` | `8082` | Port for the temporary meeting-transcription server |
+| `WHISPER_SERVER_BIN` | `~/Documents/Github/whisper.cpp/build/bin/whisper-server` | Stock server binary |
+| `WHISPER_MODELS_DIR` | `~/Documents/Github/whisper.cpp/models` | Whisper model directory |
 | `AGGREGATE_DEVICE_MATCH` | `aggregate` | Substring to find the aggregate input device |
 | `BLACKHOLE_DEVICE_MATCH` | `blackhole` | Substring to find BlackHole |
 | `MIC_CHANNEL` | `0` | Channel index for microphone |
@@ -180,5 +169,5 @@ Transcripts are Markdown files with interleaved, timestamped segments from both 
 ## How it works
 
 1. **Recording**: `sounddevice` captures from the aggregate device — mic on channel 0, system audio on channels 1–2. Averages the system channels and writes a stereo WAV (left = mic, right = system).
-2. **Transcription**: `ffmpeg` splits the stereo WAV into two 16 kHz mono files, then both are sent to the whisper.cpp `/inference` endpoint in parallel.
+2. **Transcription**: the CLI starts an isolated stock whisper.cpp server with `large-v3-turbo`; `ffmpeg` splits the stereo WAV into two 16 kHz mono files, then both are sent to `/inference` in parallel.
 3. **Merging**: Timestamped segments from both channels are interleaved by start time and rendered as Markdown, after filtering silence, collapsing hallucinated repetitions, and removing echo duplicates.
