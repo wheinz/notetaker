@@ -20,7 +20,9 @@ def test_apply_echo_cancellation_reduces_echo_energy():
 
     rng = np.random.default_rng(42)
     ref = _sine(440, sr, duration) * 0.6 + rng.normal(0, 0.05, int(sr * duration))
-    clean_voice = _sine(1200, sr, duration) * 0.1 + rng.normal(0, 0.02, int(sr * duration))
+    clean_voice = _sine(1200, sr, duration) * 0.1 + rng.normal(
+        0, 0.02, int(sr * duration)
+    )
 
     echo = np.zeros_like(ref)
     echo[delay:] = ref[:-delay] * 0.4

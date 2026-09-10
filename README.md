@@ -156,6 +156,8 @@ Transcripts are Markdown files with interleaved, timestamped segments from both 
 | `WHISPER_MODELS_DIR` | `~/Documents/Github/whisper.cpp/models` | Whisper model directory |
 | `AGGREGATE_DEVICE_MATCH` | `aggregate` | Substring to find the aggregate input device |
 | `BLACKHOLE_DEVICE_MATCH` | `blackhole` | Substring to find BlackHole |
+| `WINDOWS_MIC_DEVICE_MATCH` | *(empty)* | Windows: substring to pick the WASAPI microphone |
+| `WINDOWS_OUTPUT_DEVICE_MATCH` | *(empty)* | Windows: substring to pick the WASAPI playback device |
 | `MIC_CHANNEL` | `0` | Channel index for microphone |
 | `SYSTEM_CHANNELS` | `1,2` | Channel indices for system audio |
 | `ECHO_DEDUP_ENABLED` | `true` | Remove likely speaker echo duplicates from mic transcript segments |
@@ -165,6 +167,56 @@ Transcripts are Markdown files with interleaved, timestamped segments from both 
 | `NO_SPEECH_FILTER_ENABLED` | `true` | Drop segments with high `no_speech_prob` |
 | `NO_SPEECH_THRESHOLD` | `0.6` | `no_speech_prob` cutoff for the silence filter |
 | `VAD_ENABLED` | `true` | Request voice activity detection from the whisper.cpp server |
+
+## Windows
+
+Windows recording uses [PyAudioWPatch](https://github.com/s0d3s/PyAudioWPatch) to
+capture WASAPI playback loopback. No BlackHole or virtual audio driver is needed.
+The `record` command captures the microphone on the left channel and the selected
+output device on the right.
+
+### Setup
+
+1. On a 64-bit Windows 11 machine with Python 3.13 and uv:
+
+   ```bash
+   uv sync --python 3.13 --locked
+   ```
+
+2. Verify devices:
+
+   ```bash
+   uv run main.py devices
+   ```
+
+3. If the defaults are wrong, set `WINDOWS_MIC_DEVICE_MATCH` and/or
+   `WINDOWS_OUTPUT_DEVICE_MATCH` in `.env` to a substring of the device name,
+   then re-run `devices`.
+
+4. Record:
+
+   ```bash
+   uv run main.py record --name windows-check
+   ```
+
+   Press Ctrl+C to stop. Copy the WAV to the Mac and transcribe as usual.
+
+`devices` reports recording readiness (devices resolvable and a common rate
+found) separately from the whisper.cpp server check. A missing whisper.cpp
+server does not prevent `record`; transcription happens on the Mac.
+
+### Validate before relying on it
+
+1. Record ~15 s while speaking locally and playing meeting audio. Check the
+   left channel is the microphone and the right is meeting audio.
+2. Record again with silence before playback starts and a silent interval
+   mid-recording. Returning speech must stay at the correct time.
+3. Unplug the selected headset while recording. Expect an interruption message
+   and a readable (shorter) WAV, not automatic switching.
+4. Make one 30–60 minute recording and inspect early/late channel timing
+   (timing residuals are logged). Short tests do not prove long-recording sync.
+
+Transcription still runs on the Mac; Windows only records.
 
 ## How it works
 

@@ -4,15 +4,8 @@ import logging
 import sys
 from pathlib import Path
 
-import sounddevice as sd
-
 from src import config
-from src.recorder import (
-    SETUP_INSTRUCTIONS,
-    blackhole_present,
-    find_input_device,
-    record,
-)
+from src.recorder import record
 from src.transcriber import transcribe_meeting
 from src.whisper_server import WhisperServerError, server_command, temporary_server
 
@@ -25,29 +18,16 @@ def _check_mark(ok: bool) -> str:
 
 
 def _devices_command(args: argparse.Namespace) -> int:
-    print("Audio devices:")
-    for index, dev in enumerate(sd.query_devices()):
-        direction = []
-        if dev["max_input_channels"] > 0:
-            direction.append(f"in:{dev['max_input_channels']}")
-        if dev["max_output_channels"] > 0:
-            direction.append(f"out:{dev['max_output_channels']}")
-        print(f"  [{index}] {dev['name']} ({', '.join(direction)})")
-    print()
+    if sys.platform == "win32":
+        from src.recorder_windows import print_devices
 
-    blackhole_ok = blackhole_present()
-    aggregate = find_input_device(config.AGGREGATE_DEVICE_MATCH)
-    print(f"[{_check_mark(blackhole_ok)}] BlackHole virtual device")
-    print(
-        f"[{_check_mark(aggregate is not None)}] Aggregate input device "
-        f"(match: '{config.AGGREGATE_DEVICE_MATCH}')"
-    )
-    if aggregate is not None:
-        print(
-            f"       -> '{aggregate.name}', {aggregate.max_input_channels} "
-            f"channels. Map: mic=ch{config.MIC_CHANNEL}, "
-            f"system=ch{list(config.SYSTEM_CHANNELS)}"
-        )
+        recording_ok = print_devices()
+        setup_instructions = None
+    else:
+        from src.recorder_macos import SETUP_INSTRUCTIONS, print_devices
+
+        recording_ok = print_devices()
+        setup_instructions = SETUP_INSTRUCTIONS
 
     server_ok = False
     try:
@@ -60,9 +40,10 @@ def _devices_command(args: argparse.Namespace) -> int:
         f"({config.WHISPER_SERVER_URL})"
     )
 
-    if not (blackhole_ok and aggregate and server_ok):
-        print()
-        print(SETUP_INSTRUCTIONS)
+    if not (recording_ok and server_ok):
+        if setup_instructions:
+            print()
+            print(setup_instructions)
         return 1
     print("\nAll checks passed.")
     return 0
@@ -92,14 +73,14 @@ def main() -> None:
         prog="notetaker",
         description=(
             "Dual-channel meeting note taker: mic on the left channel, "
-            "meeting audio (via BlackHole) on the right."
+            "meeting audio on the right."
         ),
     )
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser(
         "devices",
-        help="List audio devices and verify setup (BlackHole, aggregate, server)",
+        help="List audio devices and verify setup (routing, server)",
     )
 
     record_parser = subparsers.add_parser(

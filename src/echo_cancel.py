@@ -25,7 +25,7 @@ def apply_echo_cancellation(
     clean = mic.copy()
 
     for i in range(filter_length, len(mic)):
-        x = ref[i - filter_length:i][::-1]
+        x = ref[i - filter_length : i][::-1]
         y = float(np.dot(w, x))
         e = mic[i] - y
         power = float(np.dot(x, x)) + eps

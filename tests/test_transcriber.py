@@ -40,9 +40,7 @@ def test_parse_segments_handles_missing_key():
 
 def test_parse_segments_reads_no_speech_prob():
     payload = {
-        "segments": [
-            {"text": "hello", "start": 0.0, "end": 1.0, "no_speech_prob": 0.8}
-        ]
+        "segments": [{"text": "hello", "start": 0.0, "end": 1.0, "no_speech_prob": 0.8}]
     }
     segments = parse_segments(payload)
     assert segments[0].no_speech_prob == 0.8
