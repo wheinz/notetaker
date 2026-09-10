@@ -411,18 +411,27 @@ def record(name: str | None = None) -> Path | None:
             while time.monotonic() < deadline:
                 if stop_event.is_set():
                     return
-                if (
-                    first_times[SOURCE_MIC] is not None
-                    and first_times[SOURCE_LOOPBACK] is not None
-                ):
+                if any(first_times[source] is not None for source in first_times):
                     break
                 time.sleep(0.01)
             else:
-                fail("no capture callbacks received within startup timeout")
+                fail("neither capture stream delivered audio within startup timeout")
                 return
 
-            mic_off = max(0, round((first_times[SOURCE_MIC] - t0) * rate))
-            loop_off = max(0, round((first_times[SOURCE_LOOPBACK] - t0) * rate))
+            # Some WASAPI loopback drivers do not issue callbacks while the output
+            # device is completely idle. Start the timeline as soon as either
+            # source is alive and represent a dormant source as silence until its
+            # first callback arrives.
+            offsets = {
+                source: (
+                    max(0, round((first_times[source] - t0) * rate))
+                    if first_times[source] is not None
+                    else 0
+                )
+                for source in (SOURCE_MIC, SOURCE_LOOPBACK)
+            }
+            mic_off = offsets[SOURCE_MIC]
+            loop_off = offsets[SOURCE_LOOPBACK]
             logger.info(
                 "alignment offsets: mic=%d frames, loopback=%d frames",
                 mic_off,
@@ -431,10 +440,34 @@ def record(name: str | None = None) -> Path | None:
             timeline = TimelineWriter(
                 mic_off, loop_off, max_pending_frames=queue_frames
             )
+            received_frames = {SOURCE_MIC: 0, SOURCE_LOOPBACK: 0}
+            real_started = {
+                source: first_times[source] is not None
+                for source in (SOURCE_MIC, SOURCE_LOOPBACK)
+            }
+
+            def pad_dormant_source(source: str) -> None:
+                if real_started[source]:
+                    return
+                first = first_times[source]
+                target_time = first if first is not None else time.monotonic()
+                target_end = max(0, round((target_time - t0) * rate))
+                current_end = offsets[source] + received_frames[source]
+                missing = target_end - current_end
+                room = timeline.room(source)
+                if room is not None:
+                    missing = min(missing, room)
+                if missing > 0:
+                    timeline.add(source, np.zeros(missing, dtype=np.float32))
+                    received_frames[source] += missing
 
             while True:
                 pulled = False
                 for source, q in ((SOURCE_MIC, mic_q), (SOURCE_LOOPBACK, loop_q)):
+                    before = received_frames[source]
+                    pad_dormant_source(source)
+                    if received_frames[source] != before:
+                        pulled = True
                     while True:
                         room = timeline.room(source)
                         if room is not None and room <= 0:
@@ -444,7 +477,9 @@ def record(name: str | None = None) -> Path | None:
                         except queue.Empty:
                             break
                         pulled = True
-                        process_packet(pkt, timeline)
+                        if process_packet(pkt, timeline):
+                            received_frames[source] += pkt.frame_count
+                            real_started[source] = True
                 out = timeline.write_available(session.stop_frame)
                 if out is not None:
                     pulled = True

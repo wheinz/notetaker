@@ -63,14 +63,34 @@ class _InactiveStream:
         return False
 
 
+class _SilentActiveStream:
+    """Stays active without callbacks, like an idle WASAPI loopback device."""
+
+    def __init__(self):
+        self._active = False
+
+    def start_stream(self):
+        self._active = True
+
+    def stop_stream(self):
+        self._active = False
+
+    def close(self):
+        self._active = False
+
+    def is_active(self):
+        return self._active
+
+
 class _PacedStream:
     """Delivers a fixed number of real-time-paced callbacks with a constant value."""
 
-    def __init__(self, kwargs, value, done):
+    def __init__(self, kwargs, value, done, delay=0.0):
         self.callback = kwargs["stream_callback"]
         self.channels = kwargs["channels"]
         self.value = value
         self._done = done
+        self._delay = delay
         self._active = False
         self._thread = None
 
@@ -80,6 +100,8 @@ class _PacedStream:
         self._thread.start()
 
     def _run(self):
+        if self._delay:
+            time.sleep(self._delay)
         n = 0
         while self._active and n < CALLBACKS:
             data = (
@@ -217,3 +239,68 @@ def test_record_normal_stop_writes_file(tmp_path, monkeypatch):
     assert len(data) < delivered + RATE
     assert float(np.mean(data[:, 0])) > 0.2
     assert float(np.mean(data[:, 1])) < -0.2
+
+
+def test_record_allows_idle_loopback_without_callbacks(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "RAW_DIR", tmp_path)
+    monkeypatch.setattr(rw, "_resolve_setup", _setup)
+
+    done = []
+
+    def factory(kwargs):
+        if kwargs["channels"] == 1:
+            return _PacedStream(kwargs, 0.5, done)
+        return _SilentActiveStream()
+
+    monkeypatch.setitem(sys.modules, "pyaudiowpatch", _fake_module(factory))
+
+    real_sleep = rw.time.sleep
+
+    def interrupt_sleep(seconds):
+        if seconds >= 0.5:
+            while not done:
+                real_sleep(0.001)
+            raise KeyboardInterrupt
+        real_sleep(seconds)
+
+    monkeypatch.setattr(rw.time, "sleep", interrupt_sleep)
+
+    result = rw.record(name="idle-loopback")
+    assert result == tmp_path / "idle-loopback.wav"
+    data, sr = sf.read(result)
+    assert sr == RATE
+    assert len(data) > 0
+    assert float(np.mean(data[:, 0])) > 0.2
+    assert np.all(data[:, 1] == 0.0)
+
+
+def test_record_aligns_loopback_that_starts_after_silence(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "RAW_DIR", tmp_path)
+    monkeypatch.setattr(rw, "_resolve_setup", _setup)
+
+    done = []
+
+    def factory(kwargs):
+        if kwargs["channels"] == 1:
+            return _PacedStream(kwargs, 0.5, done)
+        return _PacedStream(kwargs, -0.5, done, delay=0.1)
+
+    monkeypatch.setitem(sys.modules, "pyaudiowpatch", _fake_module(factory))
+
+    real_sleep = rw.time.sleep
+
+    def interrupt_sleep(seconds):
+        if seconds >= 0.5:
+            while len(done) < 2:
+                real_sleep(0.001)
+            raise KeyboardInterrupt
+        real_sleep(seconds)
+
+    monkeypatch.setattr(rw.time, "sleep", interrupt_sleep)
+
+    result = rw.record(name="delayed-loopback")
+    data, sr = sf.read(result)
+    audible = np.flatnonzero(np.abs(data[:, 1]) > 0.2)
+    assert len(audible) > 0
+    assert audible[0] > sr * 0.05
+    assert float(np.mean(data[audible, 1])) < -0.2
